@@ -15,6 +15,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
+#include <syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -52,11 +53,17 @@ typedef struct
 	/* IIO sample buffer */
 	struct iio_buffer *iio_rx_buffer;
 
-	/* Sample size */
+	/* Sample size (bytes) */
 	size_t sample_size;
 
 	/* Expected IIO buffer size (bytes) */
 	size_t iio_buffer_size;
+
+	/* UDP packet payload size (bytes, UDP packet size with header removed) */
+	size_t packet_payload_size;
+
+	/* Number of UDP packets required to transfer buffer */
+	size_t packets_per_buffer;
 
 	/* Current sequence number / timestamp */
 	uint64_t seqno;
@@ -96,7 +103,7 @@ void *THREAD_READ_Entrypoint(void *args)
 	THREAD_READ_Args_t *thread_args = (THREAD_READ_Args_t*)args;
 
 	/* Enter */
-	DEBUG_PRINT("Read thread enter\n");
+	DEBUG_PRINT("Read thread enter (tid: %ld)\n", syscall(SYS_gettid));
 
 	/* Set name, priority and CPU affinity */
 	pthread_setname_np(pthread_self(), "IP_SDR_GAD_RD");
@@ -206,6 +213,20 @@ void *THREAD_READ_Entrypoint(void *args)
 
 	/* Calculate expected buffer size */
 	state.iio_buffer_size = state.sample_size * thread_args->iio_buffer_size;
+
+	/* Calculate how many payload bytes fit into a packet */
+	state.packet_payload_size = thread_args->udp_packet_size - sizeof(data_ip_hdr_t);
+
+	/* Calculate how many payload bytes are in an iio buffer */
+	size_t iio_payload_size = state.iio_buffer_size;
+	if (thread_args->timestamping_enabled)
+	{
+		/* Timestamp is included in IIO sample count by client library, we'll be moving it to the header, so subtract */
+		iio_payload_size -= sizeof(uint64_t);
+	}
+
+	/* Calculate packets required to transfer a buffer, rounding up */
+	state.packets_per_buffer = (iio_payload_size + (state.packet_payload_size - 1U)) / state.packet_payload_size;
 
 	/* Summarize info */
 	DEBUG_PRINT("RX sample count: %zu, iio sample size: %zu, UDP packet size: %zu\n",
@@ -346,26 +367,21 @@ static int handle_iio_buffer(state_t *state)
 	/* Prepare data packet header */
 	data_ip_hdr_t pkr_hdr;
 	pkr_hdr.magic = SDR_IP_GADGET_MAGIC;
+	pkr_hdr.seqno = state->seqno;
+	pkr_hdr.block_index = 0;
+	pkr_hdr.block_count = state->packets_per_buffer;
 	iov[0].iov_base = &pkr_hdr;
 	iov[0].iov_len = sizeof(pkr_hdr);
 
 	/* Split buffer into datagrams */
 	while (buffer_remaining)
 	{
-		/* Set packet sequence number */
-		pkr_hdr.seqno = state->seqno;
-
 		/* Calculate amount of data to send */
-		size_t buffer_to_send = state->thread_args->udp_packet_size - sizeof(data_ip_hdr_t);
-		if (buffer_to_send > buffer_remaining)
+		size_t buffer_to_send = buffer_remaining;
+		if (buffer_to_send > state->packet_payload_size)
 		{
-			/* Limit send size to remaining buffer size */
-			buffer_to_send = buffer_remaining;
-		}
-		else if (0 != (buffer_to_send % state->sample_size))
-		{
-			/* Do not split samples across buffers, reduce number of samples sent, round down */
-			buffer_to_send = (buffer_to_send / state->sample_size) * state->sample_size;
+			/* Limit size to send to remaining buffer size */
+			buffer_to_send = state->packet_payload_size;
 		}
 
 		/* Prepare data section of datagram */
@@ -386,9 +402,12 @@ static int handle_iio_buffer(state_t *state)
 		buffer += buffer_to_send;
 		buffer_remaining -= buffer_to_send;
 
-		/* Advance sequence number by samples sent */
-		state->seqno += (buffer_to_send / state->sample_size);
+		/* Increment buffer index */
+		pkr_hdr.block_index++;
 	}
+
+	/* Advance sequence number */
+	state->seqno += state->thread_args->iio_buffer_size;
 
 	return 0;
 }

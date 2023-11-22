@@ -15,6 +15,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
+#include <syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -57,6 +58,13 @@ typedef struct
 
 	/* Expected IIO buffer size (bytes) */
 	size_t iio_buffer_size;
+
+	/* Buffer size in (samples, excluding timestamp) */
+	size_t buffer_size_samples;
+
+	/* Current block index / count */
+	uint8_t block_index;
+	uint8_t block_count;
 
 	/* Current sequence number / timestamp */
 	uint64_t seqno;
@@ -105,7 +113,7 @@ void *THREAD_WRITE_Entrypoint(void *args)
 	THREAD_WRITE_Args_t *thread_args = (THREAD_WRITE_Args_t*)args;
 
 	/* Enter */
-	DEBUG_PRINT("Write thread enter\n");
+	DEBUG_PRINT("Write thread enter (tid: %ld)\n", syscall(SYS_gettid));
 
 	/* Set name, priority and CPU affinity */
 	pthread_setname_np(pthread_self(), "IP_SDR_GAD_WR");
@@ -201,6 +209,13 @@ void *THREAD_WRITE_Entrypoint(void *args)
 
 	/* Calculate expected buffer size */
 	state.iio_buffer_size = state.sample_size * thread_args->iio_buffer_size;
+
+	/* Calculate buffer size, excluding timestamp */
+	state.buffer_size_samples = thread_args->iio_buffer_size;
+	if (thread_args->timestamping_enabled)
+	{
+		state.buffer_size_samples -= (sizeof(uint64_t) / state.sample_size);
+	}
 
 	/* Summarize info */
 	DEBUG_PRINT("TX sample count: %zu, iio sample size: %zu\n",
@@ -323,17 +338,19 @@ static int handle_socket(state_t *state)
 	/* Read until socket exhausted (hoping to receive enough packets to fill the buffer) */
 	for (;;)
 	{
+		size_t buffer_offset = state->iio_buffer_used;
+
 		if (	(0 == state->iio_buffer_used)
 			 && (state->thread_args->timestamping_enabled)
 		   )
 		{
 			/* Reserve space at head of buffer for timestamp */
-			state->iio_buffer_used += sizeof(uint64_t);
+			buffer_offset += sizeof(uint64_t);
 		}
 
 		/* Prepare buffer pointer */
-		iov[1].iov_base = &buffer[state->iio_buffer_used];
-		iov[1].iov_len = state->iio_buffer_size - state->iio_buffer_used;
+		iov[1].iov_base = &buffer[buffer_offset];
+		iov[1].iov_len = state->iio_buffer_size - buffer_offset;
 
 		/* Receive into buffers */
 		int rc = recvmsg(state->thread_args->input_fd, &msg, 0);
@@ -350,7 +367,7 @@ static int handle_socket(state_t *state)
 		}
 
 		/* Receive succeeded, what did we win? Check magic */
-		if (	((size_t)rc < sizeof(pkt_hdr))
+		if (	((size_t)rc < sizeof(data_ip_hdr_t))
 			 || (SDR_IP_GADGET_MAGIC != pkt_hdr.magic)
 		   )
 		{
@@ -359,7 +376,7 @@ static int handle_socket(state_t *state)
 		}
 
 		/* Remove packet header length from data remaining */
-		rc -= sizeof(pkt_hdr);
+		rc -= sizeof(data_ip_hdr_t);
 
 		/*
 		** Check packet sequence number / timestamp, discarding any out of order packets
@@ -367,6 +384,7 @@ static int handle_socket(state_t *state)
 		*/
 		if (pkt_hdr.seqno < state->seqno)
 		{
+			DEBUG_PRINT("Drop seq\n");
 			#if GENERATE_STATS
 			/* Count dropped datagram */
 			state->dropped++;
@@ -374,46 +392,77 @@ static int handle_socket(state_t *state)
 			continue;
 		}
 
-		if (state->thread_args->timestamping_enabled)
+		if (0 == state->iio_buffer_used)
 		{
-			/* Timestamping enabled, does this datagram start the IIO buffer? */
-			/* Note using sizeof(uint64_t) instead of zero as buffer is incremented to skip timestamp */
-			if (sizeof(uint64_t) == state->iio_buffer_used)
+			/* Check packet starts sequence */
+			if (0 != pkt_hdr.block_index)
+			{
+				DEBUG_PRINT("Drop index\n");
+				#if GENERATE_STATS
+				/* Count dropped datagram */
+				state->dropped++;
+				#endif
+
+				/* Drop packet, waiting for sequence start */
+				continue;
+			}
+
+			/* Reset index and store total */
+			state->block_index = 0;
+			state->block_count = pkt_hdr.block_count;
+
+			/* Is timestamping enabled? */
+			if (state->thread_args->timestamping_enabled)
 			{
 				/* Yes, copy timestamp from header to working data and start of buffer */
 				state->seqno = pkt_hdr.seqno;
 				*((uint64_t*)buffer) = state->seqno;
 			}
-			else
+		}
+		else
+		{
+			/* Check index, total and timestamp match */
+			if (	(state->block_index != pkt_hdr.block_index)
+				 || (state->block_count != pkt_hdr.block_count)
+				 || (state->seqno != pkt_hdr.seqno)
+			   )
 			{
-				/* No, check sequence number is correct */
-				if (state->seqno != pkt_hdr.seqno)
-				{
-					/* Sequence number is not correct */
-					#if GENERATE_STATS
-					/* Count out-of-order datagram */
-					state->outoforder++;
-					#endif
+				DEBUG_PRINT("Drop OOO\n");
 
-					/* Tweak rc length to trigger buffer push */
-					rc = (state->iio_buffer_size - state->iio_buffer_used);
+				if (state->block_index != pkt_hdr.block_index) DEBUG_PRINT("OOO: index, exp: %u, got: %u\n", (unsigned int)state->block_index, (unsigned int)pkt_hdr.block_index);
+				if (state->block_count != pkt_hdr.block_count) DEBUG_PRINT("OOO: count, exp: %u, got: %u\n", (unsigned int)state->block_count, (unsigned int)pkt_hdr.block_count);
+				if (state->seqno != pkt_hdr.seqno) DEBUG_PRINT("OOO: seq, exp: %"PRIu64", got: %"PRIu64"\n", state->seqno, pkt_hdr.seqno);
 
-					/* Reset remainder of buffer */
-					memset(&buffer[state->iio_buffer_used], 0x00, (size_t)rc);
-				}
+				/* Either an out of order, or duplicate block */
+				#if GENERATE_STATS
+				/* Count out-of-order datagram */
+				state->outoforder++;
+				#endif
+
+				/* Reset buffer */
+				state->iio_buffer_used = 0;
+
+				/* Drop packet */
+				continue;
 			}
 		}
 
 		/* Update buffer used */
+		if (	(0 == state->iio_buffer_used)
+			 && (state->thread_args->timestamping_enabled)
+		   )
+		{
+			state->iio_buffer_used += sizeof(uint64_t);
+		}
 		state->iio_buffer_used += (size_t)rc;
 
-		/* Advance sequence number */
-		state->seqno += (size_t)rc / state->sample_size;
+		/* Advance index */
+		state->block_index++;
 
 		/* Is buffer full? */
 		if (state->iio_buffer_size == state->iio_buffer_used)
 		{
-			/* Yep, time to send it */
+			/* Yep, get ready to send it */
 			#if GENERATE_STATS
 			/* Capture write period */
 			UTILS_UpdateTimeStats(&state->write_period);
@@ -442,8 +491,13 @@ static int handle_socket(state_t *state)
 
 			/* Reset buffer used */
 			state->iio_buffer_used = 0;
-		}
 
+			/* Advance sequence number */
+			state->seqno += state->buffer_size_samples;
+
+			/* Break to main loop having handled an entire iio buffer */
+			break;
+		}
 	}
 
 	return 0;

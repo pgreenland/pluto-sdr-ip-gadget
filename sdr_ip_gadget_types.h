@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /* Definitions - packet magic number */
-#define SDR_IP_GADGET_MAGIC (0x5244534F54554C50)
+#define SDR_IP_GADGET_MAGIC (0x4F544C50)
 
 /* Commands */
 #define SDR_IP_GADGET_COMMAND_START_TX (0x00)
@@ -18,7 +18,7 @@
 typedef struct
 {
 	/* Magic word, most basic protection against stray packets */
-	uint64_t magic;
+	uint32_t magic;
 
 	/* Command */
 	uint32_t cmd;
@@ -117,8 +117,15 @@ typedef union
 
 typedef struct
 {
-	/* Data packet magic */
-	uint64_t magic;
+	/* Magic word, most basic protection against stray packets */
+	uint32_t magic;
+
+	/* Block index / count */
+	uint8_t block_index;
+	uint8_t block_count;
+
+	/* Spare */
+	uint16_t unused;
 
 	/* Timestamp / sequence number */
 	uint64_t seqno;

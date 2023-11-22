@@ -70,6 +70,7 @@ static bool start_thread(state_t *state, bool tx);
 static bool stop_thread(state_t *state, bool tx);
 static void signal_handler(int signum);
 static void print_usage(const char *program_name, FILE *dest);
+static const char* cmd_name(uint32_t cmd);
 
 /* Private variables */
 static volatile sig_atomic_t keep_running = 1;
@@ -314,7 +315,7 @@ static int handle_control(state_t *state)
 	}
 
 	/* Print event summary */
-	printf("Handle control socket command: %"PRIu32"\n", cmd.hdr.cmd);
+	DEBUG_PRINT("Handle control socket command: %s\n", cmd_name(cmd.hdr.cmd));
 
 	/* Act on command */
 	switch (cmd.hdr.cmd)
@@ -512,4 +513,17 @@ static void print_usage(const char *program_name, FILE *dest)
 	fprintf(dest, "  -h, --help\tDisplay this help message\n");
 	fprintf(dest, "  -d, --debug\tEnable debug output\n");
 	fprintf(dest, "  -v, --version\tDisplay the version of the program\n");
+}
+
+static const char* cmd_name(uint32_t cmd)
+{
+	const char* name = "UNKNOWN";
+	const char* cmd_names[] = {"START_TX", "START_RX", "STOP_TX", "STOP_RX"};
+
+	if (cmd < ARRAY_SIZE(cmd_names))
+	{
+		name = cmd_names[cmd];
+	}
+
+	return name;
 }
