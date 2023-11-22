@@ -384,7 +384,6 @@ static int handle_socket(state_t *state)
 		*/
 		if (pkt_hdr.seqno < state->seqno)
 		{
-			DEBUG_PRINT("Drop seq\n");
 			#if GENERATE_STATS
 			/* Count dropped datagram */
 			state->dropped++;
@@ -397,7 +396,6 @@ static int handle_socket(state_t *state)
 			/* Check packet starts sequence */
 			if (0 != pkt_hdr.block_index)
 			{
-				DEBUG_PRINT("Drop index\n");
 				#if GENERATE_STATS
 				/* Count dropped datagram */
 				state->dropped++;
@@ -427,12 +425,6 @@ static int handle_socket(state_t *state)
 				 || (state->seqno != pkt_hdr.seqno)
 			   )
 			{
-				DEBUG_PRINT("Drop OOO\n");
-
-				if (state->block_index != pkt_hdr.block_index) DEBUG_PRINT("OOO: index, exp: %u, got: %u\n", (unsigned int)state->block_index, (unsigned int)pkt_hdr.block_index);
-				if (state->block_count != pkt_hdr.block_count) DEBUG_PRINT("OOO: count, exp: %u, got: %u\n", (unsigned int)state->block_count, (unsigned int)pkt_hdr.block_count);
-				if (state->seqno != pkt_hdr.seqno) DEBUG_PRINT("OOO: seq, exp: %"PRIu64", got: %"PRIu64"\n", state->seqno, pkt_hdr.seqno);
-
 				/* Either an out of order, or duplicate block */
 				#if GENERATE_STATS
 				/* Count out-of-order datagram */
