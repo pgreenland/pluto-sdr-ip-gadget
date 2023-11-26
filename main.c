@@ -174,6 +174,62 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+    // Get the current send buffer size
+    int send_size;
+	socklen_t size_len = sizeof(send_size);
+    if (getsockopt(state.sock_data, SOL_SOCKET, SO_SNDBUF, &send_size, &size_len) == -1)
+	{
+        perror("getsockopt for send buffer size");
+        return 1;
+    }
+
+    // Get the current receive buffer size
+    int recv_size;
+    size_len = sizeof(recv_size);
+    if (getsockopt(state.sock_data, SOL_SOCKET, SO_RCVBUF, &recv_size, &size_len) == -1)
+	{
+        perror("getsockopt for receive buffer size");
+        return 1;
+    }
+
+	// Report current sizes
+    DEBUG_PRINT("Current socket send = %d receive = %d\n", send_size, recv_size);
+
+	// Set the send buffer size
+	send_size = 524288;
+    if (setsockopt(state.sock_data, SOL_SOCKET, SO_SNDBUF, &send_size, sizeof(send_size)) == -1)
+	{
+        perror("setsockopt for send buffer size");
+        return 1;
+    }
+
+	// Set the receive buffer size
+	recv_size = 524288;
+    if (setsockopt(state.sock_data, SOL_SOCKET, SO_RCVBUF, &recv_size, sizeof(send_size)) == -1)
+	{
+        perror("setsockopt for receive buffer size");
+        return 1;
+    }
+
+    // Get the updated send buffer size
+	size_len = sizeof(send_size);
+    if (getsockopt(state.sock_data, SOL_SOCKET, SO_SNDBUF, &send_size, &size_len) == -1)
+	{
+        perror("getsockopt for send buffer size");
+        return 1;
+    }
+
+    // Get the updated receive buffer size
+    size_len = sizeof(recv_size);
+    if (getsockopt(state.sock_data, SOL_SOCKET, SO_RCVBUF, &recv_size, &size_len) == -1)
+	{
+        perror("getsockopt for receive buffer size");
+        return 1;
+    }
+
+	// Report updated sizes
+    DEBUG_PRINT("Updated socket send = %d receive = %d\n", send_size, recv_size);
+
 	/* Bind sockets */
 	memset(&addr, 0x00, sizeof(addr));
 	addr.sin_family = AF_INET;
