@@ -65,6 +65,14 @@ typedef struct
 	/* Number of UDP packets required to transfer buffer */
 	size_t packets_per_buffer;
 
+	/*
+	** Array of message headers, io vectors and packet headers
+	** Each msg has two io vectors, one for the header and one for the data
+	*/
+	struct mmsghdr *arr_mmsg_hdrs;
+	struct iovec *arr_iovs;
+	data_ip_hdr_t *arr_pkt_hdrs;
+
 	/* Current sequence number / timestamp */
 	uint64_t seqno;
 
@@ -108,7 +116,7 @@ void *THREAD_READ_Entrypoint(void *args)
 	/* Set name, priority and CPU affinity */
 	pthread_setname_np(pthread_self(), "IP_SDR_GAD_RD");
 	UTILS_SetThreadRealtimePriority();
-	UTILS_SetThreadAffinity(0);
+	UTILS_SetThreadAffinity(1);
 
 	/* Reset state */
 	state_t state;
@@ -227,6 +235,49 @@ void *THREAD_READ_Entrypoint(void *args)
 
 	/* Calculate packets required to transfer a buffer, rounding up */
 	state.packets_per_buffer = (iio_payload_size + (state.packet_payload_size - 1U)) / state.packet_payload_size;
+
+	/* Allocate multiple message header structure, which will hold pointers to individual messages and send results */
+	state.arr_mmsg_hdrs = calloc(state.packets_per_buffer, sizeof(struct mmsghdr));
+
+	/* For each msg we require two io vectors (one for the header and one for the data) */
+	state.arr_iovs = calloc(2 * state.packets_per_buffer, sizeof(struct iovec));
+
+	/* We require a fixed header for each data block */
+	state.arr_pkt_hdrs = calloc(state.packets_per_buffer, sizeof(data_ip_hdr_t));
+
+	/* Pre-populate fixed fields */
+	for (size_t i = 0; i < state.packets_per_buffer; i++)
+	{
+		/* Each message will be sent to the same address */
+		state.arr_mmsg_hdrs[i].msg_hdr.msg_name = &state.thread_args->addr;
+		state.arr_mmsg_hdrs[i].msg_hdr.msg_namelen = sizeof(state.thread_args->addr);
+
+		/* Each message makes use of two IOVs (one for the header and one for the data) */
+		state.arr_mmsg_hdrs[i].msg_hdr.msg_iov = &state.arr_iovs[2 * i];
+		state.arr_mmsg_hdrs[i].msg_hdr.msg_iovlen = 2;
+
+		/* First IOV of each pair points at packet header, next will point at payload and be updated just before tranmission */
+		state.arr_iovs[(2 * i) + 0].iov_base = &state.arr_pkt_hdrs[i];
+		state.arr_iovs[(2 * i) + 0].iov_len = sizeof(*state.arr_pkt_hdrs);
+		state.arr_iovs[(2 * i) + 1].iov_base = NULL;
+		if (i < (state.packets_per_buffer - 1))
+		{
+			/* Not the last packet, therefore must be full */
+			state.arr_iovs[(2 * i) + 1].iov_len = state.thread_args->udp_packet_size - sizeof(*state.arr_pkt_hdrs);
+		}
+		else
+		{
+			/* Last packet, work out how many bytes of the payload it will contain */
+			size_t iio_buffer_size_exc_timestamp = state.iio_buffer_size;
+			if (state.thread_args->timestamping_enabled) iio_buffer_size_exc_timestamp -= sizeof(uint64_t);
+			state.arr_iovs[(2 * i) + 1].iov_len = sizeof(data_ip_hdr_t) + (iio_buffer_size_exc_timestamp % state.packet_payload_size);
+		}
+
+		/* Prepare packet headers, just need to fill in the sequence number at transmission time */
+		state.arr_pkt_hdrs[i].magic = SDR_IP_GADGET_MAGIC;
+		state.arr_pkt_hdrs[i].block_index = (uint8_t)i;
+		state.arr_pkt_hdrs[i].block_count = (uint8_t)state.packets_per_buffer;
+	}
 
 	/* Summarize info */
 	DEBUG_PRINT("RX sample count: %zu, iio sample size: %zu, UDP packet size: %zu\n",
@@ -355,55 +406,28 @@ static int handle_iio_buffer(state_t *state)
 		buffer_remaining -= sizeof(uint64_t);
 	}
 
-	/* Prepare scatter/gather structures */
-	struct iovec iov[2];
-	struct msghdr msg;
-	memset(&msg, 0, sizeof(msg));
-	msg.msg_name = &state->thread_args->addr;
-	msg.msg_namelen = sizeof(state->thread_args->addr);
-	msg.msg_iov = iov;
-	msg.msg_iovlen = 2;
-
-	/* Prepare data packet header */
-	data_ip_hdr_t pkr_hdr;
-	pkr_hdr.magic = SDR_IP_GADGET_MAGIC;
-	pkr_hdr.seqno = state->seqno;
-	pkr_hdr.block_index = 0;
-	pkr_hdr.block_count = state->packets_per_buffer;
-	iov[0].iov_base = &pkr_hdr;
-	iov[0].iov_len = sizeof(pkr_hdr);
-
-	/* Split buffer into datagrams */
-	while (buffer_remaining)
+	/* Prepare multi-message send structures */
+	for (size_t i = 0; i < state->packets_per_buffer; i++)
 	{
-		/* Calculate amount of data to send */
-		size_t buffer_to_send = buffer_remaining;
-		if (buffer_to_send > state->packet_payload_size)
-		{
-			/* Limit size to send to remaining buffer size */
-			buffer_to_send = state->packet_payload_size;
-		}
+		/* Set sequence number for packet */
+		state->arr_pkt_hdrs[i].seqno = state->seqno;
 
-		/* Prepare data section of datagram */
-		iov[1].iov_base = buffer;
-		iov[1].iov_len = buffer_to_send;
+		/* Set data pointer for packet */
+		state->arr_iovs[(2 * i) + 1].iov_base = buffer;
+		buffer += state->packet_payload_size;
+	}
 
-		/* Send datagram */
-		if (-1 == sendmsg(state->thread_args->output_fd, &msg, 0))
-		{
-			/* Send failed */
-			#if GENERATE_STATS
-			/* Count overflow */
-			state->overflows++;
-			#endif
-		}
-
-		/* Advance pointers and reduce sizes */
-		buffer += buffer_to_send;
-		buffer_remaining -= buffer_to_send;
-
-		/* Increment buffer index */
-		pkr_hdr.block_index++;
+	/* Send all datagrams with single system call :-) */
+	if (state->packets_per_buffer != sendmmsg(state->thread_args->output_fd,
+											  state->arr_mmsg_hdrs,
+											  state->packets_per_buffer,
+											  0))
+	{
+		/* Send failed */
+		#if GENERATE_STATS
+		/* Count overflow */
+		state->overflows++;
+		#endif
 	}
 
 	/* Advance sequence number */
