@@ -1,9 +1,13 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.9.4)
 
 project(sdr_ip_gadget LANGUAGES C)
 
 # Options
 option(GENERATE_STATS "Generate and output runtime stats" OFF)
+
+# Check if link time optimisation is supported
+include(CheckIPOSupported)
+check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
 
 # From: https://www.mattkeeter.com/blog/2018-01-06-versioning/
 execute_process(COMMAND git log --pretty=format:'%h' -n 1
@@ -45,5 +49,12 @@ target_compile_definitions(sdr_ip_gadget PRIVATE
 if (GENERATE_STATS)
 target_compile_definitions(sdr_ip_gadget PRIVATE GENERATE_STATS=1)
 endif(GENERATE_STATS)
+
+if(lto_supported)
+    message(STATUS "LTO enabled")
+    set_property(TARGET sdr_ip_gadget PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+    message(STATUS "LTO not supported: <${lto_error}>")
+endif()
 
 install(TARGETS sdr_ip_gadget RUNTIME DESTINATION sbin)
