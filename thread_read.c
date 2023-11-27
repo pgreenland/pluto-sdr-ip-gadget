@@ -258,12 +258,12 @@ void *THREAD_READ_Entrypoint(void *args)
 
 		/* First IOV of each pair points at packet header, next will point at payload and be updated just before tranmission */
 		state.arr_iovs[(2 * i) + 0].iov_base = &state.arr_pkt_hdrs[i];
-		state.arr_iovs[(2 * i) + 0].iov_len = sizeof(*state.arr_pkt_hdrs);
+		state.arr_iovs[(2 * i) + 0].iov_len = sizeof(data_ip_hdr_t);
 		state.arr_iovs[(2 * i) + 1].iov_base = NULL;
 		if (i < (state.packets_per_buffer - 1))
 		{
 			/* Not the last packet, therefore must be full */
-			state.arr_iovs[(2 * i) + 1].iov_len = state.thread_args->udp_packet_size - sizeof(*state.arr_pkt_hdrs);
+			state.arr_iovs[(2 * i) + 1].iov_len = state.thread_args->udp_packet_size - sizeof(data_ip_hdr_t);
 		}
 		else
 		{

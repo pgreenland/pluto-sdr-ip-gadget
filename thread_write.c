@@ -77,10 +77,13 @@ typedef struct
 	int stats_timerfd;
 
 	/* Drop count (due to bad seq no) */
-	uint32_t dropped;
+	uint32_t dropped_seq;
+
+	/* Drop count (due to bad index) */
+	uint32_t dropped_index;
 
 	/* Partial buffer pushes (due to out of order seq no) */
-	uint32_t outoforder;
+	uint32_t out_of_order;
 
 	/* Overflow count */
 	uint32_t overflows;
@@ -378,19 +381,6 @@ static int handle_socket(state_t *state)
 		/* Remove packet header length from data remaining */
 		rc -= sizeof(data_ip_hdr_t);
 
-		/*
-		** Check packet sequence number / timestamp, discarding any out of order packets
-		** Note this is fragile against time warps
-		*/
-		if (pkt_hdr.seqno < state->seqno)
-		{
-			#if GENERATE_STATS
-			/* Count dropped datagram */
-			state->dropped++;
-			#endif
-			continue;
-		}
-
 		if (0 == state->iio_buffer_used)
 		{
 			/* Check packet starts sequence */
@@ -398,10 +388,23 @@ static int handle_socket(state_t *state)
 			{
 				#if GENERATE_STATS
 				/* Count dropped datagram */
-				state->dropped++;
+				state->dropped_index++;
 				#endif
 
 				/* Drop packet, waiting for sequence start */
+				continue;
+			}
+
+			/*
+			** Check packet sequence number / timestamp, discarding any out of order packets
+			** Note this is fragile against time warps
+			*/
+			if (pkt_hdr.seqno < state->seqno)
+			{
+				#if GENERATE_STATS
+				/* Count dropped datagram */
+				state->dropped_seq++;
+				#endif
 				continue;
 			}
 
@@ -428,7 +431,7 @@ static int handle_socket(state_t *state)
 				/* Either an out of order, or duplicate block */
 				#if GENERATE_STATS
 				/* Count out-of-order datagram */
-				state->outoforder++;
+				state->out_of_order++;
 				#endif
 
 				/* Reset buffer */
@@ -526,24 +529,31 @@ static int handle_stats_timer(state_t *state)
 		printf("Write overflows: %u in last 5s period\n", state->overflows);
 	}
 
-	/* Check for dropped */
-	if (state->dropped > 0)
+	/* Check for dropped due to seq no */
+	if (state->dropped_seq > 0)
 	{
-		printf("Write dropped: %u in last 5s period\n", state->dropped);
+		printf("Write dropped_seq: %u in last 5s period\n", state->dropped_seq);
+	}
+
+	/* Check for dropped due to index */
+	if (state->dropped_index > 0)
+	{
+		printf("Write dropped_index: %u in last 5s period\n", state->dropped_index);
 	}
 
 	/* Check for out of order */
-	if (state->outoforder > 0)
+	if (state->out_of_order > 0)
 	{
-		printf("Write outoforder: %u in last 5s period\n", state->outoforder);
+		printf("Write out_of_order: %u in last 5s period\n", state->out_of_order);
 	}
 
 	/* Reset stats */
 	UTILS_ResetTimeStats(&state->write_period);
 	UTILS_ResetTimeStats(&state->write_dur);
 	state->overflows = 0;
-	state->dropped = 0;
-	state->outoforder = 0;
+	state->dropped_seq = 0;
+	state->dropped_index = 0;
+	state->out_of_order = 0;
 
 	return 0;
 }
