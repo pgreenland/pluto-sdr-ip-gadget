@@ -170,6 +170,7 @@ void *THREAD_READ_Entrypoint(void *args)
 
 	/* Disable all channels */
 	unsigned int nb_channels = iio_device_get_channels_count(iio_dev_rx);
+	DEBUG_PRINT("Found %i RX channels\n", nb_channels);
 	for (unsigned int i = 0; i < nb_channels; i++)
 	{
 		iio_channel_disable(iio_device_get_channel(iio_dev_rx, i));
@@ -190,6 +191,9 @@ void *THREAD_READ_Entrypoint(void *args)
 			}
 
 			/* Enable channels */
+			DEBUG_PRINT("Enable channel: %s, is scan element: %s\n",
+						iio_channel_get_id(channel),
+						iio_channel_is_scan_element(channel) ? "true" : "false");
 			iio_channel_enable(channel);
 		}
 	}

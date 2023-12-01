@@ -389,9 +389,9 @@ static int handle_control(state_t *state)
 			stop_thread(state, true);
 
 			/* Prepare args */
-			DEBUG_PRINT("Start TX with chans: %08X, timestamp: %u, buffsize: %zu\n",
+			DEBUG_PRINT("Start TX with chans: %08X, timestamp: %S, buffsize: %zu\n",
 						cmd.start_tx.enabled_channels,
-						cmd.start_tx.timestamping_enabled,
+						cmd.start_tx.timestamping_enabled ? "enabled" : "disabled",
 						cmd.start_tx.buffer_size);
 			state->write_args.iio_channels = cmd.start_tx.enabled_channels;
 			state->write_args.timestamping_enabled = cmd.start_tx.timestamping_enabled;
@@ -419,9 +419,9 @@ static int handle_control(state_t *state)
 				perror("Error converting address to string");
 				addr_str[0] = '\0';
 			}
-			DEBUG_PRINT("Start RX with chans: %08X, timestamp: %u, buffsize: %zu, pktsize: %zu, dest: %s:%u\n",
+			DEBUG_PRINT("Start RX with chans: %08X, timestamp: %s, buffsize: %zu, pktsize: %zu, dest: %s:%u\n",
 						cmd.start_rx.enabled_channels,
-						cmd.start_rx.timestamping_enabled,
+						cmd.start_rx.timestamping_enabled ? "enabled" : "disabled",
 						cmd.start_rx.buffer_size,
 						cmd.start_rx.packet_size,
 						addr_str, ntohs(cmd.start_rx.data_port));
